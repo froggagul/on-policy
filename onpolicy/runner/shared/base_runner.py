@@ -50,6 +50,10 @@ class Runner(object):
         # dir
         self.model_dir = self.all_args.model_dir
 
+        if wandb.run is None and self.use_wandb:
+            print("wandb is not initialized")
+            self.use_wandb = False
+
         if self.use_wandb:
             self.save_dir = str(wandb.run.dir)
             self.run_dir = str(wandb.run.dir)

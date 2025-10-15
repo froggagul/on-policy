@@ -1,0 +1,9 @@
+wandb
+setproctitle
+numpy
+torch --index-url https://download.pytorch.org/whl/cpu
+absl-py
+gym==0.17.2
+seaborn
+tensorboardX
+imageio

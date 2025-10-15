@@ -1,3 +1,4 @@
+import os
 import time
 import numpy as np
 import torch
@@ -245,4 +246,7 @@ class MPERunner(Runner):
             print("average episode rewards is: " + str(np.mean(np.sum(np.array(episode_rewards), axis=0))))
 
         if self.all_args.save_gifs:
-            imageio.mimsave(str(self.gif_dir) + '/render.gif', all_frames, duration=self.all_args.ifi)
+            gif_dir = os.path.join(self.run_dir, "gifs")
+            if not os.path.exists(gif_dir):
+                os.makedirs(gif_dir)
+            imageio.mimsave(gif_dir + '/render.gif', all_frames, duration=self.all_args.ifi)
