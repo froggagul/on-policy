@@ -15,7 +15,7 @@ WORKDIR /workspace
 # ---- Clone repo ----
 ARG REPO_URL="https://github.com/froggagul/on-policy"
 ARG REPO_DIR="on-policy"
-RUN git clone --depth 1 "$REPO_URL" "$REPO_DIR"
+RUN git clone "$REPO_URL" "$REPO_DIR"
 
 # ---- Install Python deps from req.txt, then the package in editable mode ----
 WORKDIR /workspace/${REPO_DIR}

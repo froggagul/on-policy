@@ -1,116 +1,289 @@
+# rendering.py
 """
-2D rendering framework
+Matplotlib-based 2D rendering (headless-friendly).
+Drop-in replacement for the pyglet/OpenGL version used by MultiAgentEnv.
 """
-from __future__ import division
-import os
-import six
-import sys
 
-if "Apple" in sys.version:
-    if 'DYLD_FALLBACK_LIBRARY_PATH' in os.environ:
-        os.environ['DYLD_FALLBACK_LIBRARY_PATH'] += ':/usr/lib'
-        # (JDS 2016/04/15): avoid bug on Anaconda 2.3.0 / Yosemite
+from __future__ import annotations
 
-from gym import error
-
-try:
-    import pyglet
-except ImportError as e:
-    print(suffix="HINT: you can install pyglet directly via 'pip install pyglet'. But if you really just want to install all Gym dependencies and not have to think about it, 'pip install -e .[all]' or 'pip install gym[all]' will do it.")
-
-try:
-    from pyglet.gl import *
-except ImportError as e:
-    print(prefix="Error occured while running `from pyglet.gl import *`",suffix="HINT: make sure you have OpenGL install. On Ubuntu, you can run 'apt-get install python-opengl'. If you're running on a server, you may need a virtual frame buffer; something like this should work: 'xvfb-run -s \"-screen 0 1400x900x24\" python <your_script.py>'")
+# Force a non-interactive backend for servers/headless use.
+import matplotlib
+matplotlib.use("Agg")
 
 import math
 import numpy as np
 
+from matplotlib.figure import Figure
+from matplotlib.patches import Circle as MplCircle, Polygon as MplPolygon
+from matplotlib.lines import Line2D
+from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
+from matplotlib import transforms as mtransforms
+
+
 RAD2DEG = 57.29577951308232
 
-def get_display(spec):
-    """Convert a display specification (such as :0) into an actual Display
-    object.
 
-    Pyglet only supports multiple Displays on Linux.
-    """
-    if spec is None:
-        return None
-    elif isinstance(spec, six.string_types):
-        return pyglet.canvas.Display(spec)
+def _clamp01(x: float) -> float:
+    return float(max(0.0, min(1.0, x)))
+
+
+class Attr:
+    def enable(self, *args, **kwargs):
+        raise NotImplementedError
+
+    def disable(self, *args, **kwargs):
+        pass
+
+
+class Color(Attr):
+    def __init__(self, vec4):
+        # (r, g, b, a), each in [0,1]
+        r, g, b, a = vec4
+        self.vec4 = (_clamp01(r), _clamp01(g), _clamp01(b), _clamp01(a))
+
+    def enable(self, *args, **kwargs):
+        # handled in Geom draw path
+        pass
+
+
+class LineWidth(Attr):
+    def __init__(self, stroke: float):
+        self.stroke = float(stroke)
+
+    def enable(self, *args, **kwargs):
+        # handled in Geom draw path
+        pass
+
+
+class Transform(Attr):
+    def __init__(self, translation=(0.0, 0.0), rotation=0.0, scale=(1.0, 1.0)):
+        self.set_translation(*translation)
+        self.set_rotation(rotation)
+        self.set_scale(*scale)
+
+    def set_translation(self, newx, newy):
+        self.translation = (float(newx), float(newy))
+
+    def set_rotation(self, new):
+        self.rotation = float(new)  # radians
+
+    def set_scale(self, newx, newy):
+        self.scale = (float(newx), float(newy))
+
+    def as_affine(self) -> mtransforms.Affine2D:
+        t = mtransforms.Affine2D()
+        # Match the original GL order by composing in the same sequence used on enable().
+        # In the original code transforms were enabled in reversed(self.attrs).
+        # We'll compose the per-Transform operation here; Geom will decide ordering.
+        tx, ty = self.translation
+        sx, sy = self.scale
+        if sx != 1.0 or sy != 1.0:
+            t = t.scale(sx, sy)
+        if self.rotation != 0.0:
+            t = t.rotate(self.rotation)
+        if tx != 0.0 or ty != 0.0:
+            t = t.translate(tx, ty)
+        return t
+
+
+class Geom:
+    def __init__(self):
+        self._color = Color((0.0, 0.0, 0.0, 1.0))
+        self.attrs = [self._color]
+        self._linewidth = LineWidth(1.0)
+
+    # API compatibility with original
+    def add_attr(self, attr: Attr):
+        self.attrs.append(attr)
+
+    def set_color(self, r, g, b, alpha=1.0):
+        self._color = Color((r, g, b, alpha))
+        # keep it present/last-set in attrs
+        # remove previous Color if exists then append fresh one
+        self.attrs = [a for a in self.attrs if not isinstance(a, Color)]
+        self.attrs.append(self._color)
+
+    def set_linewidth(self, x):
+        self._linewidth = LineWidth(x)
+
+    # Helpers for subclasses
+    def _collect_transform(self) -> mtransforms.Affine2D:
+        # Emulate original GL order: enable() was called in reversed(self.attrs)
+        # so we’ll multiply transforms in reversed attr order.
+        affine = mtransforms.Affine2D()
+        for attr in reversed(self.attrs):
+            if isinstance(attr, Transform):
+                affine = affine + attr.as_affine()
+        return affine
+
+    def _get_colors(self):
+        r, g, b, a = self._color.vec4
+        face = (r, g, b, a)
+        edge = (0.5 * r, 0.5 * g, 0.5 * b, 0.5 * a)
+        return face, edge
+
+    def _get_linewidth(self):
+        return self._linewidth.stroke
+
+    # Subclasses must implement this: add matplotlib artists to ax
+    def draw(self, ax):
+        raise NotImplementedError
+
+
+class FilledPolygon(Geom):
+    def __init__(self, v):
+        super().__init__()
+        # v: list of (x, y)
+        self.v = np.asarray(v, dtype=float)
+
+    def draw(self, ax):
+        face, edge = self._get_colors()
+        patch = MplPolygon(self.v, closed=True, facecolor=face, edgecolor=edge, linewidth=self._get_linewidth())
+        patch.set_transform(self._collect_transform() + ax.transData)
+        ax.add_patch(patch)
+
+
+class PolyLine(Geom):
+    def __init__(self, v, close: bool):
+        super().__init__()
+        self.v = np.asarray(v, dtype=float)
+        self.close = bool(close)
+
+    def draw(self, ax):
+        face, edge = self._get_colors()
+        if self.close:
+            # close loop by repeating first point
+            pts = np.vstack([self.v, self.v[0]])
+        else:
+            pts = self.v
+        line = Line2D(pts[:, 0], pts[:, 1], linewidth=self._get_linewidth(), color=edge)
+        # Apply transform to data coordinates by transforming the points beforehand
+        aff = self._collect_transform()
+        pts_t = aff.transform(pts)
+        line.set_data(pts_t[:, 0], pts_t[:, 1])
+        ax.add_line(line)
+
+
+class Circle(Geom):
+    def __init__(self, radius=10.0):
+        super().__init__()
+        self.radius = float(radius)
+
+    def draw(self, ax):
+        face, edge = self._get_colors()
+        patch = MplCircle((0.0, 0.0), self.radius, facecolor=face, edgecolor=edge, linewidth=self._get_linewidth())
+        patch.set_transform(self._collect_transform() + ax.transData)
+        ax.add_patch(patch)
+
+
+class Compound(Geom):
+    def __init__(self, geoms):
+        super().__init__()
+        self.gs = geoms
+
+    def draw(self, ax):
+        for g in self.gs:
+            g.draw(ax)
+
+
+def make_circle(radius=10, res=30, filled=True):
+    # res is unused here; matplotlib draws circle analytically.
+    return Circle(radius=radius)
+
+
+def make_polygon(v, filled=True):
+    if filled:
+        return FilledPolygon(v)
     else:
-        raise error.Error('Invalid display specification: {}. (Must be a string like :0 or None.)'.format(spec))
+        return PolyLine(v, True)
 
-class Viewer(object):
-    def __init__(self, width, height, display=None):
-        display = get_display(display)
 
-        self.width = width
-        self.height = height
+def make_polyline(v):
+    return PolyLine(v, False)
 
-        self.window = pyglet.window.Window(width=width, height=height, display=display)
-        self.window.on_close = self.window_closed_by_user
+
+def make_capsule(length, width):
+    # Optional helper for parity with original; not used by your env code.
+    # Build as a rectangle + two semicircles using Compound.
+    half_w = width / 2.0
+    body = make_polygon([(0, -half_w), (0, half_w), (length, half_w), (length, -half_w)], filled=True)
+    cap0 = make_circle(half_w)
+    cap1 = make_circle(half_w)
+    t1 = Transform(translation=(length, 0.0))
+    cap1.add_attr(t1)
+    return Compound([body, cap0, cap1])
+
+
+class Viewer:
+    def __init__(self, width, height, display=None, dpi=100):
+        # width, height are pixels (to match old API expectations)
+        self.width = int(width)
+        self.height = int(height)
+        self.dpi = int(dpi)
+
+        self.figure = Figure(figsize=(self.width / self.dpi, self.height / self.dpi), dpi=self.dpi)
+        self.canvas = FigureCanvas(self.figure)
+        self.ax = self.figure.add_subplot(111)
+        self.ax.set_facecolor((1, 1, 1))
+        self.ax.axis("off")
         self.geoms = []
         self.onetime_geoms = []
-        self.transform = Transform()
 
-        glEnable(GL_BLEND)
-        # glEnable(GL_MULTISAMPLE)
-        glEnable(GL_LINE_SMOOTH)
-        # glHint(GL_LINE_SMOOTH_HINT, GL_DONT_CARE)
-        glHint(GL_LINE_SMOOTH_HINT, GL_NICEST)
-        glLineWidth(2.0)
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        # default bounds
+        self._bounds = (-1.0, 1.0, -1.0, 1.0)
 
     def close(self):
-        self.window.close()
+        # Nothing to close in headless mode.
+        pass
 
-    def window_closed_by_user(self):
-        self.close()
-
+    # API compatibility
     def set_bounds(self, left, right, bottom, top):
         assert right > left and top > bottom
-        scalex = self.width/(right-left)
-        scaley = self.height/(top-bottom)
-        self.transform = Transform(
-            translation=(-left*scalex, -bottom*scaley),
-            scale=(scalex, scaley))
+        self._bounds = (left, right, bottom, top)
 
-    def add_geom(self, geom):
+    def add_geom(self, geom: Geom):
         self.geoms.append(geom)
 
-    def add_onetime(self, geom):
+    def add_onetime(self, geom: Geom):
         self.onetime_geoms.append(geom)
 
-    def render(self, return_rgb_array=False):
-        glClearColor(1,1,1,1)
-        self.window.clear()
-        self.window.switch_to()
-        self.window.dispatch_events()
-        self.transform.enable()
-        for geom in self.geoms:
-            geom.render()
-        for geom in self.onetime_geoms:
-            geom.render()
-        self.transform.disable()
-        arr = None
-        if return_rgb_array:
-            buffer = pyglet.image.get_buffer_manager().get_color_buffer()
-            image_data = buffer.get_image_data()
-            arr = np.fromstring(image_data.get_data(), dtype=np.uint8, sep='')
-            # In https://github.com/openai/gym-http-api/issues/2, we
-            # discovered that someone using Xmonad on Arch was having
-            # a window of size 598 x 398, though a 600 x 400 window
-            # was requested. (Guess Xmonad was preserving a pixel for
-            # the boundary.) So we use the buffer height/width rather
-            # than the requested one.
-            arr = arr.reshape(buffer.height, buffer.width, 4)
-            arr = arr[::-1,:,0:3]
-        self.window.flip()
-        self.onetime_geoms = []
-        return arr
+    def _prepare_axes(self):
+        left, right, bottom, top = self._bounds
+        self.ax.clear()
+        self.ax.set_facecolor((1, 1, 1))
+        self.ax.set_xlim(left, right)
+        self.ax.set_ylim(bottom, top)
+        self.ax.set_aspect('equal', adjustable='box')
+        self.ax.axis("off")
 
-    # Convenience
+    def render(self, return_rgb_array=False):
+        self._prepare_axes()
+
+        # Draw persistent geoms
+        for g in self.geoms:
+            g.draw(self.ax)
+        # Draw one-time geoms
+        for g in self.onetime_geoms:
+            g.draw(self.ax)
+
+        # Clear one-time geoms after draw (API parity)
+        self.onetime_geoms = []
+
+        self.canvas.draw()
+
+        if return_rgb_array:
+            w, h = self.canvas.get_width_height()
+            buf = np.frombuffer(self.canvas.tostring_argb(), dtype=np.uint8)
+            arr = buf.reshape((h, w, 4))[:, :, :3]  # drop alpha
+            # The original pyglet path returned an array with origin at the *top*.
+            # Agg already returns top-origin buffers; if you need bottom-origin, flip here:
+            # arr = arr[::-1, :, :]
+            return arr
+
+        # In "human" mode we don’t open a window server-side. No-op.
+        return None
+
+    # Convenience drawing helpers (kept for API parity, rarely used)
     def draw_circle(self, radius=10, res=30, filled=True, **attrs):
         geom = make_circle(radius=radius, res=res, filled=filled)
         _add_attrs(geom, attrs)
@@ -130,215 +303,51 @@ class Viewer(object):
         return geom
 
     def draw_line(self, start, end, **attrs):
-        geom = Line(start, end)
+        geom = PolyLine([start, end], close=False)
         _add_attrs(geom, attrs)
         self.add_onetime(geom)
         return geom
 
     def get_array(self):
-        self.window.flip()
-        image_data = pyglet.image.get_buffer_manager().get_color_buffer().get_image_data()
-        self.window.flip()
-        arr = np.fromstring(image_data.data, dtype=np.uint8, sep='')
-        arr = arr.reshape(self.height, self.width, 4)
-        return arr[::-1,:,0:3]
+        # Kept for parity with original API
+        return self.render(return_rgb_array=True)
 
-def _add_attrs(geom, attrs):
+
+def _add_attrs(geom: Geom, attrs: dict):
     if "color" in attrs:
         geom.set_color(*attrs["color"])
     if "linewidth" in attrs:
         geom.set_linewidth(attrs["linewidth"])
 
-class Geom(object):
-    def __init__(self):
-        self._color=Color((0, 0, 0, 1.0))
-        self.attrs = [self._color]
-    def render(self):
-        for attr in reversed(self.attrs):
-            attr.enable()
-        self.render1()
-        for attr in self.attrs:
-            attr.disable()
-    def render1(self):
-        raise NotImplementedError
-    def add_attr(self, attr):
-        self.attrs.append(attr)
-    def set_color(self, r, g, b, alpha=1):
-        self._color.vec4 = (r, g, b, alpha)
 
-class Attr(object):
-    def enable(self):
-        raise NotImplementedError
-    def disable(self):
-        pass
-
-class Transform(Attr):
-    def __init__(self, translation=(0.0, 0.0), rotation=0.0, scale=(1,1)):
-        self.set_translation(*translation)
-        self.set_rotation(rotation)
-        self.set_scale(*scale)
-    def enable(self):
-        glPushMatrix()
-        glTranslatef(self.translation[0], self.translation[1], 0) # translate to GL loc ppint
-        glRotatef(RAD2DEG * self.rotation, 0, 0, 1.0)
-        glScalef(self.scale[0], self.scale[1], 1)
-    def disable(self):
-        glPopMatrix()
-    def set_translation(self, newx, newy):
-        self.translation = (float(newx), float(newy))
-    def set_rotation(self, new):
-        self.rotation = float(new)
-    def set_scale(self, newx, newy):
-        self.scale = (float(newx), float(newy))
-
-class Color(Attr):
-    def __init__(self, vec4):
-        self.vec4 = vec4
-    def enable(self):
-        glColor4f(*self.vec4)
-
-class LineStyle(Attr):
-    def __init__(self, style):
-        self.style = style
-    def enable(self):
-        glEnable(GL_LINE_STIPPLE)
-        glLineStipple(1, self.style)
-    def disable(self):
-        glDisable(GL_LINE_STIPPLE)
-
-class LineWidth(Attr):
-    def __init__(self, stroke):
-        self.stroke = stroke
-    def enable(self):
-        glLineWidth(self.stroke)
-
-class Point(Geom):
-    def __init__(self):
-        Geom.__init__(self)
-    def render1(self):
-        glBegin(GL_POINTS) # draw point
-        glVertex3f(0.0, 0.0, 0.0)
-        glEnd()
-
-class FilledPolygon(Geom):
-    def __init__(self, v):
-        Geom.__init__(self)
-        self.v = v
-    def render1(self):
-        if   len(self.v) == 4 : glBegin(GL_QUADS)
-        elif len(self.v)  > 4 : glBegin(GL_POLYGON)
-        else: glBegin(GL_TRIANGLES)
-        for p in self.v:
-            glVertex3f(p[0], p[1],0)  # draw each vertex
-        glEnd()
-
-        color = (self._color.vec4[0] * 0.5, self._color.vec4[1] * 0.5, self._color.vec4[2] * 0.5, self._color.vec4[3] * 0.5)
-        glColor4f(*color)
-        glBegin(GL_LINE_LOOP)
-        for p in self.v:
-            glVertex3f(p[0], p[1],0)  # draw each vertex
-        glEnd()
-
-def make_circle(radius=10, res=30, filled=True):
-    points = []
-    for i in range(res):
-        ang = 2*math.pi*i / res
-        points.append((math.cos(ang)*radius, math.sin(ang)*radius))
-    if filled:
-        return FilledPolygon(points)
-    else:
-        return PolyLine(points, True)
-
-def make_polygon(v, filled=True):
-    if filled: return FilledPolygon(v)
-    else: return PolyLine(v, True)
-
-def make_polyline(v):
-    return PolyLine(v, False)
-
-def make_capsule(length, width):
-    l, r, t, b = 0, length, width/2, -width/2
-    box = make_polygon([(l,b), (l,t), (r,t), (r,b)])
-    circ0 = make_circle(width/2)
-    circ1 = make_circle(width/2)
-    circ1.add_attr(Transform(translation=(length, 0)))
-    geom = Compound([box, circ0, circ1])
-    return geom
-
-class Compound(Geom):
-    def __init__(self, gs):
-        Geom.__init__(self)
-        self.gs = gs
-        for g in self.gs:
-            g.attrs = [a for a in g.attrs if not isinstance(a, Color)]
-    def render1(self):
-        for g in self.gs:
-            g.render()
-
-class PolyLine(Geom):
-    def __init__(self, v, close):
-        Geom.__init__(self)
-        self.v = v
-        self.close = close
-        self.linewidth = LineWidth(1)
-        self.add_attr(self.linewidth)
-    def render1(self):
-        glBegin(GL_LINE_LOOP if self.close else GL_LINE_STRIP)
-        for p in self.v:
-            glVertex3f(p[0], p[1],0)  # draw each vertex
-        glEnd()
-    def set_linewidth(self, x):
-        self.linewidth.stroke = x
-
-class Line(Geom):
-    def __init__(self, start=(0.0, 0.0), end=(0.0, 0.0)):
-        Geom.__init__(self)
-        self.start = start
-        self.end = end
-        self.linewidth = LineWidth(1)
-        self.add_attr(self.linewidth)
-
-    def render1(self):
-        glBegin(GL_LINES)
-        glVertex2f(*self.start)
-        glVertex2f(*self.end)
-        glEnd()
-
-class Image(Geom):
-    def __init__(self, fname, width, height):
-        Geom.__init__(self)
-        self.width = width
-        self.height = height
-        img = pyglet.image.load(fname)
-        self.img = img
-        self.flip = False
-    def render1(self):
-        self.img.blit(-self.width/2, -self.height/2, width=self.width, height=self.height)
-
-# ================================================================
-
+# Simple image viewer implemented with matplotlib (API compatibility if you use it elsewhere)
 class SimpleImageViewer(object):
     def __init__(self, display=None):
-        self.window = None
+        self.figure = None
+        self.canvas = None
+        self.ax = None
         self.isopen = False
-        self.display = display
-    def imshow(self, arr):
-        if self.window is None:
-            height, width, channels = arr.shape
-            self.window = pyglet.window.Window(width=width, height=height, display=self.display)
-            self.width = width
-            self.height = height
+
+    def imshow(self, arr: np.ndarray):
+        h, w, c = arr.shape
+        if c != 3:
+            raise AssertionError("Expected an RGB image (H, W, 3).")
+        if self.figure is None:
+            self.figure = Figure(figsize=(w / 100.0, h / 100.0), dpi=100)
+            self.canvas = FigureCanvas(self.figure)
+            self.ax = self.figure.add_subplot(111)
+            self.ax.axis("off")
             self.isopen = True
-        assert arr.shape == (self.height, self.width, 3), "You passed in an image with the wrong number shape"
-        image = pyglet.image.ImageData(self.width, self.height, 'RGB', arr.tobytes(), pitch=self.width * -3)
-        self.window.clear()
-        self.window.switch_to()
-        self.window.dispatch_events()
-        image.blit(0,0)
-        self.window.flip()
+        else:
+            self.ax.clear()
+            self.ax.axis("off")
+
+        # Matplotlib expects origin at lower-left by default; show as-is.
+        self.ax.imshow(arr)
+        self.canvas.draw()
+
     def close(self):
-        if self.isopen:
-            self.window.close()
-            self.isopen = False
+        self.isopen = False
+
     def __del__(self):
         self.close()
