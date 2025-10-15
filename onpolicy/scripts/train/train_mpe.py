@@ -96,15 +96,15 @@ def main(args):
         torch.set_num_threads(all_args.n_training_threads)
 
     # run dir
-    run_dir = Path(
-        os.path.join(
-            "results",
-            all_args.env_name,
-            all_args.scenario_name,
-            all_args.algorithm_name,
-            all_args.experiment_name,
-        )
-    )
+    run_dir = Path("checkpoints")
+    #     os.path.join(
+    #         "results",
+    #         all_args.env_name,
+    #         all_args.scenario_name,
+    #         all_args.algorithm_name,
+    #         all_args.experiment_name,
+    #     )
+    # )
     if not run_dir.exists():
         os.makedirs(str(run_dir))
 
@@ -122,17 +122,18 @@ def main(args):
                          job_type="training",
                          reinit=True)
     else:
-        if not run_dir.exists():
-            curr_run = 'run1'
-        else:
-            exst_run_nums = [int(str(folder.name).split('run')[1]) for folder in run_dir.iterdir() if str(folder.name).startswith('run')]
-            if len(exst_run_nums) == 0:
-                curr_run = 'run1'
-            else:
-                curr_run = 'run%i' % (max(exst_run_nums) + 1)
-        run_dir = run_dir / curr_run
-        if not run_dir.exists():
-            os.makedirs(str(run_dir))
+        curr_run = "run"
+        # if not run_dir.exists():
+        #     curr_run = 'run1'
+        # else:
+        #     exst_run_nums = [int(str(folder.name).split('run')[1]) for folder in run_dir.iterdir() if str(folder.name).startswith('run')]
+        #     if len(exst_run_nums) == 0:
+        #         curr_run = 'run1'
+        #     else:
+        #         curr_run = 'run%i' % (max(exst_run_nums) + 1)
+        # run_dir = run_dir / curr_run
+        # if not run_dir.exists():
+        #     os.makedirs(str(run_dir))
 
     setproctitle.setproctitle(str(all_args.algorithm_name) + "-" + \
         str(all_args.env_name) + "-" + str(all_args.experiment_name) + "@" + str(all_args.user_name))

@@ -12,7 +12,7 @@ python onpolicy/scripts/render/render_mpe.py \
     --save_gifs \
     --env_name MPE \
     --algorithm_name rmappo \
-    --experiment_name check \
+    --experiment_name test \
     --scenario_name simple_spread \
     --num_agents 3 \
     --num_landmarks 3 \
@@ -21,8 +21,6 @@ python onpolicy/scripts/render/render_mpe.py \
     --n_rollout_threads 1 \
     --use_render \
     --use_ReLU \
-    --hidden_size 16 \
     --episode_length 25 \
     --render_episodes 5 \
-    --gif_dir . \
-    --use_wandb # This means not to use wandb.. strange
+    --model_dir "checkpoints/models"
