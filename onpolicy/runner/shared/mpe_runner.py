@@ -249,4 +249,4 @@ class MPERunner(Runner):
             gif_dir = os.path.join(self.run_dir, "gifs")
             if not os.path.exists(gif_dir):
                 os.makedirs(gif_dir)
-            imageio.mimsave('result.gif', all_frames, duration=self.all_args.ifi)
+            imageio.mimsave(f'result_{self.all_args.scenario_name}_{self.all_args.algorithm_name}.gif', all_frames, duration=self.all_args.ifi)

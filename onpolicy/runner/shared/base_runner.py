@@ -102,6 +102,8 @@ class Runner(object):
                                         share_observation_space,
                                         self.envs.action_space[0])
 
+        self.logs = []
+
     def run(self):
         """Collect training data, perform training updates, and evaluate policy."""
         raise NotImplementedError
@@ -189,3 +191,24 @@ class Runner(object):
                     wandb.log({k: np.mean(v)}, step=total_num_steps)
                 else:
                     self.writter.add_scalars(k, {k: np.mean(v)}, total_num_steps)
+
+        self.logs.append(env_infos)
+        # plot and save reward figure
+
+        agent_number = self.all_args.num_agents
+        rewards = [
+            [np.mean(env_info[f'agent{i}/individual_rewards']) for env_info in self.logs] for i in range(agent_number)
+        ]
+
+        import matplotlib.pyplot as plt
+        plt.figure()
+        xs = list(range(len(self.logs) * self.log_interval, self.log_interval))
+        for i, agent_reward in enumerate(rewards):
+            plt.plot(agent_reward, label=f'agent {i}')
+
+        plt.xlabel('Episodes')
+        plt.ylabel('Rewards')
+        plt.title('Training Rewards')
+        plt.legend()
+        plt.savefig(f'rewards_{self.all_args.scenario_name}_{self.all_args.algorithm_name}.png')
+        plt.close()

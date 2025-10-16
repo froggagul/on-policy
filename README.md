@@ -126,3 +126,7 @@ year={2022}
 }
 ```
 
+
+
+
+training_result.png 업데이트

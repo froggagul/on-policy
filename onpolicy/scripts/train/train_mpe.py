@@ -96,15 +96,12 @@ def main(args):
         torch.set_num_threads(all_args.n_training_threads)
 
     # run dir
-    run_dir = Path("checkpoints")
-    #     os.path.join(
-    #         "results",
-    #         all_args.env_name,
-    #         all_args.scenario_name,
-    #         all_args.algorithm_name,
-    #         all_args.experiment_name,
-    #     )
-    # )
+    run_dir = Path(os.path.join(
+            "checkpoints",
+            all_args.scenario_name,
+            all_args.algorithm_name,
+        )
+    )
     if not run_dir.exists():
         os.makedirs(str(run_dir))
 

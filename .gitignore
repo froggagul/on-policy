@@ -17,4 +17,5 @@ logs
 
 .venv
 checkpoints
-result.gif
+*.gif
+*.png
